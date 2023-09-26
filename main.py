@@ -13,6 +13,9 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import vgg
 
+import sparselearning
+from sparselearning.core import Masking, CosineDecay, LinearDecay
+
 model_names = sorted(name for name in vgg.__dict__
     if name.islower() and not name.startswith("__")
                      and name.startswith("vgg")
@@ -54,6 +57,9 @@ parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
                     default='save_temp', type=str)
 
+parser.add_argument('--multiplier', type=int, default=1, metavar='N',
+                    help='extend training time by multiplier times')
+sparselearning.core.add_sparse_args(parser)
 
 best_prec1 = 0
 
@@ -130,11 +136,19 @@ def main():
         validate(val_loader, model, criterion)
         return
 
+    mask = None
+    if args.sparse:
+        decay = CosineDecay(args.death_rate, len(train_loader)*(args.epochs*args.multiplier))
+        mask = Masking(optimizer, death_rate=args.death_rate, death_mode=args.death, death_rate_decay=decay, growth_mode=args.growth,
+                        redistribution_mode=args.redistribution, args=args)
+        mask.add_module(model, sparse_init=args.sparse_init, density=args.density)  # add mask (initialized as 0 matirx) to represent the whole model. --libn
+
+
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch)
+        train(train_loader, model, criterion, optimizer, epoch, mask)
 
         # evaluate on validation set
         prec1 = validate(val_loader, model, criterion)
@@ -149,7 +163,7 @@ def main():
         }, is_best, filename=os.path.join(args.save_dir, 'checkpoint_{}.tar'.format(epoch)))
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch, mask):
     """
         Run one train epoch
     """
@@ -168,8 +182,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
         data_time.update(time.time() - end)
 
         if args.cpu == False:
-            input = input.cuda(async=True)
-            target = target.cuda(async=True)
+            input = input.cuda()
+            target = target.cuda()
         if args.half:
             input = input.half()
 
@@ -180,7 +194,12 @@ def train(train_loader, model, criterion, optimizer, epoch):
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
-        optimizer.step()
+        # optimizer.step()
+
+        if args.sparse:
+            mask.step()
+        else: 
+            optimizer.step()        
 
         output = output.float()
         loss = loss.float()
@@ -217,8 +236,8 @@ def validate(val_loader, model, criterion):
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
         if args.cpu == False:
-            input = input.cuda(async=True)
-            target = target.cuda(async=True)
+            input = input.cuda()
+            target = target.cuda()
 
         if args.half:
             input = input.half()
@@ -302,3 +321,4 @@ def accuracy(output, target, topk=(1,)):
 
 if __name__ == '__main__':
     main()
+
